@@ -1,0 +1,13 @@
+spring:
+  profiles:
+    active: live
+  output:
+    ansi:
+      enabled: always
+
+server:
+  servlet:
+    encoding:
+      enabled: true
+      force: true
+      charset: UTF-8

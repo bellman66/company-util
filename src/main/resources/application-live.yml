@@ -1,0 +1,11 @@
+spring:
+  thymeleaf:
+    cache: false
+
+app:
+  configuration:
+    api:
+      apiUrl: "https://api.odcloud.kr/api/nts-businessman/v1/status"
+      apiKey: "ifyAoaKqxfgiVhk%2FgPgUZO21ZVQjlIy8kH0M9JygCw5mKqFYgU79I5h3Nzr%2FSB%2BwFUS3%2FvK%2BhAPwAuw%2Br6xVJw%3D%3D"
+    file:
+      baseUrl: "/volume1/FileServer/excel"
