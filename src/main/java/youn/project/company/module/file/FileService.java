@@ -12,17 +12,14 @@ import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
+import youn.project.company.module.file.data.PortalRes;
 import youn.project.company.setting.props.ApiProps;
 import youn.project.company.setting.props.FileProps;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.net.URI;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
+import java.util.stream.IntStream;
 
 @Service
 @RequiredArgsConstructor
@@ -32,76 +29,98 @@ public class FileService {
     private final FileProps fileProps;
     private final RestTemplate restTemplate;
 
-    public String requestFile(MultipartFile requestFile) throws IOException {
+    public String requestFile(MultipartFile requestFile) {
         String fileName = "";
         String resourceUrl = "";
-        InputStream inputStream = null;
-        FileOutputStream outputStream = null;
 
-        try {
-            inputStream = requestFile.getInputStream();
+        fileName = UUID.randomUUID().toString();
+        resourceUrl = fileProps.getBaseUrl() + fileName + ".xlsx";
+        File file = new File(resourceUrl);
 
-            XSSFWorkbook workbook = new XSSFWorkbook(inputStream);
+        try (
+                InputStream inputStream = requestFile.getInputStream();
+                XSSFWorkbook workbook = new XSSFWorkbook(inputStream);
+                FileOutputStream outputStream = new FileOutputStream(file)
+        ) {
             XSSFSheet sheet = workbook.getSheetAt(0);
 
-            // 1. 모든 row id 취합
             List<String> bNoList = new ArrayList<>();
-            for(int rowIdx = sheet.getFirstRowNum(); rowIdx <= sheet.getLastRowNum(); rowIdx++) {
-                XSSFRow row = sheet.getRow(rowIdx);
-                XSSFCell cell = row.getCell(0);
-                bNoList.add(cell.getRawValue());
-            }
+            Queue<PortalRes> portalResQueue = new LinkedList<>();
 
-            // 2. request API
-            List<String> taxTypeList = new ArrayList<>();
+            int currentIdx = sheet.getFirstRowNum();
+            int endRowNum = sheet.getLastRowNum();
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+            int defaultStepCnt = 100;
+            while (currentIdx < endRowNum) {
+                int stepCnt = currentIdx + defaultStepCnt <= endRowNum ?
+                        defaultStepCnt : endRowNum - currentIdx;
 
-            MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-            body.put("b_no", bNoList);
+                // Insert Target bNo
+                IntStream.range(currentIdx, currentIdx + stepCnt)
+                        .mapToObj(rowIdx -> {
+                            XSSFRow row = sheet.getRow(rowIdx);
+                            XSSFCell cell = row.getCell(0);
+                            return cell.getRawValue();
+                        })
+                        .forEach(bNoList::add);
 
-            // 중요 : URI 가 인코딩되는과정에서 %가 아스키 25번으로 중복으로 더해짐 그래서 이렇게써줘야함
-            URI uri = URI.create(apiProps.getApiUrl() + "?serviceKey=" + apiProps.getApiKey());
-            HttpEntity<?> httpEntity = new HttpEntity<>(body, headers);
-            ResponseEntity<JsonNode> response = restTemplate.postForEntity(uri, httpEntity, JsonNode.class);
-            if(response.getStatusCode() == HttpStatus.OK) {
-                JsonNode result = response.getBody();
-                XSSFRow newRow = sheet.createRow(1);
+                // Call Data Portal
+                ResponseEntity<JsonNode> portalData = callDataportal(bNoList);
 
-                for (JsonNode data : result.withArray("data")) {
-                    String bNo = data.path("b_no").textValue();             // 사업자번호
-                    String taxType = data.path("tax_type").textValue();      // Value
+                // Guard - Not 200 Receive
+                if (portalData.getStatusCode() != HttpStatus.OK) break;
 
-                    taxTypeList.add(taxType);
+                assert portalData.getBody() != null;
+                for (JsonNode data : portalData.getBody().withArray("data")) {
+                    String bStt = data.path("b_stt").textValue();             // 사업자번호
+                    String taxType = data.path("tax_type").textValue();
+                    String endDt = data.path("end_dt").textValue();    // Value
+
+                    portalResQueue.add(PortalRes.create(bStt, taxType, endDt));
                 }
-            }
 
-            // 3. Set Tax Type value
-            if (bNoList.size() == taxTypeList.size()) {
-                for(int idx= 0; idx<taxTypeList.size(); idx++) {
-                    XSSFRow row = sheet.getRow(idx);
-                    XSSFCell cell = row.createCell(1);
-                    cell.setCellValue(taxTypeList.get(idx));
+                for (int rowIdx = currentIdx; rowIdx < currentIdx + stepCnt; rowIdx++) {
+                    // Create Cell
+                    XSSFRow row = sheet.getRow(rowIdx);
+                    XSSFCell bSttCell = row.createCell(1);
+                    XSSFCell taxTypeCell = row.createCell(2);
+                    XSSFCell endDtCell = row.createCell(3);
+
+                    // Target Value
+                    PortalRes target = portalResQueue.poll();
+
+                    bSttCell.setCellValue(target.getBStt());
+                    taxTypeCell.setCellValue(target.getTaxType());
+                    endDtCell.setCellValue(target.getEndDt());
                 }
+
+                bNoList.clear();
+                portalResQueue.clear();
+
+                currentIdx += defaultStepCnt;
             }
 
-            fileName = UUID.randomUUID().toString();
-            resourceUrl = fileProps.getBaseUrl() + fileName + ".xlsx";
-            File file = new File(resourceUrl);
-
-            outputStream = new FileOutputStream(file);
             workbook.write(outputStream);
-        }
-        catch (Exception exception) {
+            outputStream.flush();
+        } catch (Exception exception) {
             exception.printStackTrace();
-        }
-        finally {
-            inputStream.close();
-            outputStream.close();
         }
 
         return fileName;
+    }
+
+    private ResponseEntity<JsonNode> callDataportal(List<String> aBNoList) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+
+        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+        body.put("b_no", aBNoList);
+
+        // 중요 : URI 가 인코딩되는과정에서 %가 아스키 25번으로 중복으로 더해짐 그래서 이렇게써줘야함
+        URI uri = URI.create(apiProps.getApiUrl() + "?serviceKey=" + apiProps.getApiKey());
+        HttpEntity<?> httpEntity = new HttpEntity<>(body, headers);
+
+        return restTemplate.postForEntity(uri, httpEntity, JsonNode.class);
     }
 }

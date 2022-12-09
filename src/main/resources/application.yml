@@ -4,6 +4,9 @@ spring:
   output:
     ansi:
       enabled: always
+  servlet:
+    multipart:
+      max-file-size: 100MB
 
 server:
   servlet:
